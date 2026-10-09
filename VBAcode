@@ -1,0 +1,367 @@
+Attribute VB_Name = "EmailCleanerModule"
+Option Explicit
+
+' =====================================================================
+' Email Cleaner for Microsoft Word
+'
+' Setup (one time):
+'   1. Turn on: File > Options > Trust Center > Trust Center Settings >
+'      Macro Settings > "Trust access to the VBA project object model"
+'   2. Run BuildEmailCleanerForm once. This creates the pop-up form.
+'   3. You may turn the trust setting back off afterward.
+'
+' Daily use:
+'   Run EmailCleaner (assign it to the Quick Access Toolbar if you like).
+' =====================================================================
+
+Private Const FORM_NAME As String = "frmEmailCleaner"
+Private Const DEFAULT_STATUS As String = _
+    "Click in the report where the list should go, then click an Insert button."
+
+' ---------------------------------------------------------------------
+' Opens the Email Cleaner pop-up (modeless, so you can click the document)
+' ---------------------------------------------------------------------
+Public Sub EmailCleaner()
+    Dim f As Object
+
+    For Each f In VBA.UserForms
+        If f.Name = FORM_NAME Then
+            f.Show vbModeless
+            Exit Sub
+        End If
+    Next f
+
+    On Error GoTo NotBuilt
+    VBA.UserForms.Add(FORM_NAME).Show vbModeless
+    Exit Sub
+
+NotBuilt:
+    MsgBox "The Email Cleaner form has not been built yet." & vbCrLf & _
+           "Run BuildEmailCleanerForm once first.", vbExclamation, "Email Cleaner"
+End Sub
+
+' ---------------------------------------------------------------------
+' One-time setup: builds the pop-up form
+' ---------------------------------------------------------------------
+Public Sub BuildEmailCleanerForm()
+    Dim proj As Object
+    Dim comp As Object
+    Dim frm As Object
+    Dim code As String
+    Dim testCount As Long
+
+    On Error Resume Next
+    Set proj = MacroContainer.VBProject
+    testCount = proj.VBComponents.Count
+    If Err.Number <> 0 Or proj Is Nothing Then
+        On Error GoTo 0
+        MsgBox "Word is blocking access to the VBA project." & vbCrLf & vbCrLf & _
+               "Go to File > Options > Trust Center > Trust Center Settings > " & _
+               "Macro Settings and check ""Trust access to the VBA project object model""." & _
+               vbCrLf & "Then run this macro again.", vbExclamation, "Email Cleaner"
+        Exit Sub
+    End If
+    On Error GoTo 0
+
+    For Each comp In proj.VBComponents
+        If comp.Name = FORM_NAME Then
+            MsgBox "The form already exists. To rebuild it, remove " & FORM_NAME & _
+                   " in the VBA editor (right-click > Remove) and run this again.", _
+                   vbInformation, "Email Cleaner"
+            Exit Sub
+        End If
+    Next comp
+
+    Set comp = proj.VBComponents.Add(3) ' 3 = UserForm
+    comp.Name = FORM_NAME
+    comp.Properties("Caption") = "Email Cleaner"
+    comp.Properties("Width") = 424
+    comp.Properties("Height") = 372
+    comp.Properties("ShowModal") = False
+
+    Set frm = comp.Designer
+
+    AddLabel frm, "lblInput", "Paste raw emails below (any format, one or many per line):", 6, 6, 404, 12
+    AddTextBox frm, "txtInput", 6, 20, 404, 90
+
+    AddButton frm, "cmdClean", "Clean Emails", 6, 116, 98, 24
+    AddButton frm, "cmdUsernames", "Get Usernames", 108, 116, 98, 24
+    AddButton frm, "cmdClear", "Clear All", 210, 116, 98, 24
+    AddButton frm, "cmdClose", "Close", 312, 116, 98, 24
+
+    AddLabel frm, "lblEmails", "Cleaned emails:", 6, 148, 200, 12
+    AddLabel frm, "lblUsernames", "Usernames:", 210, 148, 200, 12
+    AddTextBox frm, "txtEmails", 6, 162, 200, 120
+    AddTextBox frm, "txtUsernames", 210, 162, 200, 120
+
+    AddButton frm, "cmdInsertEmails", "Insert Emails at Cursor", 6, 288, 200, 24
+    AddButton frm, "cmdInsertUsernames", "Insert Usernames at Cursor", 210, 288, 200, 24
+
+    AddLabel frm, "lblStatus", DEFAULT_STATUS, 6, 318, 404, 24
+
+    code = EventSub("cmdClean", "EC_Clean Me") & _
+           EventSub("cmdUsernames", "EC_Usernames Me") & _
+           EventSub("cmdClear", "EC_Clear Me") & _
+           EventSub("cmdClose", "Unload Me") & _
+           EventSub("cmdInsertEmails", "EC_InsertEmails Me") & _
+           EventSub("cmdInsertUsernames", "EC_InsertUsernames Me")
+
+    comp.CodeModule.AddFromString code
+
+    MsgBox "Email Cleaner form created." & vbCrLf & _
+           "Run the EmailCleaner macro to open it.", vbInformation, "Email Cleaner"
+End Sub
+
+' ---------------------------------------------------------------------
+' Button actions (called by the form)
+' ---------------------------------------------------------------------
+Public Sub EC_Clean(frm As Object)
+    Dim emails As Collection
+
+    Set emails = ExtractEmails(frm.Controls("txtInput").Text)
+    If emails.Count = 0 Then
+        SetStatus frm, "No email addresses found in the input box."
+        Exit Sub
+    End If
+
+    frm.Controls("txtEmails").Text = JoinCollection(emails)
+    SetStatus frm, emails.Count & " email address(es) cleaned. " & DEFAULT_STATUS
+End Sub
+
+Public Sub EC_Usernames(frm As Object)
+    Dim src As String
+    Dim emails As Collection
+    Dim names As New Collection
+    Dim e As Variant
+    Dim u As String
+
+    src = frm.Controls("txtInput").Text
+    If Len(Trim$(src)) = 0 Then src = frm.Controls("txtEmails").Text
+
+    Set emails = ExtractEmails(src)
+    If emails.Count = 0 Then
+        SetStatus frm, "No email addresses found to pull usernames from."
+        Exit Sub
+    End If
+
+    For Each e In emails
+        u = Left$(e, InStr(e, "@") - 1)
+        On Error Resume Next
+        names.Add u, u
+        On Error GoTo 0
+    Next e
+
+    frm.Controls("txtUsernames").Text = JoinCollection(names)
+    SetStatus frm, names.Count & " username(s) found. " & DEFAULT_STATUS
+End Sub
+
+Public Sub EC_Clear(frm As Object)
+    frm.Controls("txtInput").Text = ""
+    frm.Controls("txtEmails").Text = ""
+    frm.Controls("txtUsernames").Text = ""
+    SetStatus frm, DEFAULT_STATUS
+End Sub
+
+Public Sub EC_InsertEmails(frm As Object)
+    InsertBulletList frm, frm.Controls("txtEmails").Text, "email address(es)"
+End Sub
+
+Public Sub EC_InsertUsernames(frm As Object)
+    InsertBulletList frm, frm.Controls("txtUsernames").Text, "username(s)"
+End Sub
+
+' ---------------------------------------------------------------------
+' Inserts a bulleted list at the cursor. If the cursor is on a line with
+' text (such as a section heading), the list goes on the line below it.
+' ---------------------------------------------------------------------
+Private Sub InsertBulletList(frm As Object, ByVal listText As String, ByVal label As String)
+    Dim parts() As String
+    Dim i As Long
+    Dim lineText As String
+    Dim joined As String
+    Dim itemCount As Long
+    Dim para As Range
+    Dim rng As Range
+    Dim paraText As String
+    Dim undoStarted As Boolean
+
+    listText = Replace(listText, vbCrLf, vbLf)
+    listText = Replace(listText, vbCr, vbLf)
+    parts = Split(listText, vbLf)
+
+    For i = LBound(parts) To UBound(parts)
+        lineText = Trim$(parts(i))
+        If Len(lineText) > 0 Then
+            If Len(joined) > 0 Then joined = joined & vbCr
+            joined = joined & lineText
+            itemCount = itemCount + 1
+        End If
+    Next i
+
+    If itemCount = 0 Then
+        SetStatus frm, "Nothing to insert. Clean the emails or get usernames first."
+        Exit Sub
+    End If
+
+    If Documents.Count = 0 Then
+        SetStatus frm, "Open a document first."
+        Exit Sub
+    End If
+
+    On Error Resume Next
+    Application.UndoRecord.StartCustomRecord "Insert " & label
+    undoStarted = (Err.Number = 0)
+    On Error GoTo 0
+
+    Set para = Selection.Paragraphs(1).Range
+    paraText = Replace(Replace(para.Text, vbCr, ""), Chr(7), "")
+
+    If Len(Trim$(paraText)) > 0 Then
+        para.InsertParagraphAfter
+        Set para = para.Paragraphs(para.Paragraphs.Count).Range
+    End If
+
+    Set rng = para.Duplicate
+    rng.Collapse wdCollapseStart
+    rng.Text = joined
+    rng.Style = wdStyleListBullet
+
+    rng.Collapse wdCollapseEnd
+    rng.Select
+
+    If undoStarted Then Application.UndoRecord.EndCustomRecord
+
+    SetStatus frm, itemCount & " " & label & " inserted."
+End Sub
+
+' ---------------------------------------------------------------------
+' Email parsing
+' ---------------------------------------------------------------------
+Private Function ExtractEmails(ByVal s As String) As Collection
+    Dim result As New Collection
+    Dim seps As Variant
+    Dim i As Long
+    Dim tokens() As String
+    Dim tok As String
+
+    seps = Array(vbCrLf, vbCr, vbLf, vbTab, ChrW(160), ",", ";", "(", ")", _
+                 "<", ">", "[", "]", "{", "}", """", "|", "/", "\")
+
+    For i = LBound(seps) To UBound(seps)
+        s = Replace(s, seps(i), " ")
+    Next i
+
+    tokens = Split(s, " ")
+
+    For i = LBound(tokens) To UBound(tokens)
+        tok = CleanToken(tokens(i))
+        If IsValidEmail(tok) Then
+            On Error Resume Next
+            result.Add tok, tok   ' key prevents duplicates
+            On Error GoTo 0
+        End If
+    Next i
+
+    Set ExtractEmails = result
+End Function
+
+Private Function CleanToken(ByVal t As String) As String
+    t = LCase$(Trim$(t))
+    If Left$(t, 7) = "mailto:" Then t = Mid$(t, 8)
+
+    Do While Len(t) > 0
+        If Left$(t, 1) Like "[a-z0-9_]" Then Exit Do
+        t = Mid$(t, 2)
+    Loop
+
+    Do While Len(t) > 0
+        If Right$(t, 1) Like "[a-z0-9]" Then Exit Do
+        t = Left$(t, Len(t) - 1)
+    Loop
+
+    CleanToken = t
+End Function
+
+Private Function IsValidEmail(ByVal t As String) As Boolean
+    Dim atPos As Long
+    Dim localPart As String
+    Dim domainPart As String
+    Dim tld As String
+    Dim i As Long
+
+    atPos = InStr(t, "@")
+    If atPos < 2 Then Exit Function
+    If InStr(atPos + 1, t, "@") > 0 Then Exit Function
+
+    localPart = Left$(t, atPos - 1)
+    domainPart = Mid$(t, atPos + 1)
+
+    If InStr(domainPart, ".") = 0 Then Exit Function
+    If Left$(domainPart, 1) = "." Or Right$(domainPart, 1) = "." Then Exit Function
+    If InStr(domainPart, "..") > 0 Then Exit Function
+
+    For i = 1 To Len(localPart)
+        If Not Mid$(localPart, i, 1) Like "[a-z0-9._%+'!#$&*=?^`~-]" Then Exit Function
+    Next i
+
+    For i = 1 To Len(domainPart)
+        If Not Mid$(domainPart, i, 1) Like "[a-z0-9.-]" Then Exit Function
+    Next i
+
+    tld = Mid$(domainPart, InStrRev(domainPart, ".") + 1)
+    If Len(tld) < 2 Then Exit Function
+
+    IsValidEmail = True
+End Function
+
+' ---------------------------------------------------------------------
+' Helpers
+' ---------------------------------------------------------------------
+Private Function JoinCollection(c As Collection) As String
+    Dim v As Variant
+    Dim s As String
+    For Each v In c
+        If Len(s) > 0 Then s = s & vbCrLf
+        s = s & v
+    Next v
+    JoinCollection = s
+End Function
+
+Private Sub SetStatus(frm As Object, ByVal msg As String)
+    frm.Controls("lblStatus").Caption = msg
+End Sub
+
+Private Function EventSub(ByVal ctlName As String, ByVal body As String) As String
+    EventSub = "Private Sub " & ctlName & "_Click()" & vbCrLf & _
+               "    " & body & vbCrLf & _
+               "End Sub" & vbCrLf & vbCrLf
+End Function
+
+Private Sub AddLabel(frm As Object, ByVal nm As String, ByVal cap As String, _
+                     ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal h As Single)
+    Dim c As Object
+    Set c = frm.Controls.Add("Forms.Label.1", nm)
+    c.Caption = cap
+    c.Left = l: c.Top = t: c.Width = w: c.Height = h
+    c.WordWrap = True
+End Sub
+
+Private Sub AddTextBox(frm As Object, ByVal nm As String, _
+                       ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal h As Single)
+    Dim c As Object
+    Set c = frm.Controls.Add("Forms.TextBox.1", nm)
+    c.Left = l: c.Top = t: c.Width = w: c.Height = h
+    c.MultiLine = True
+    c.WordWrap = True
+    c.EnterKeyBehavior = True
+    c.ScrollBars = 2 ' vertical
+End Sub
+
+Private Sub AddButton(frm As Object, ByVal nm As String, ByVal cap As String, _
+                      ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal h As Single)
+    Dim c As Object
+    Set c = frm.Controls.Add("Forms.CommandButton.1", nm)
+    c.Caption = cap
+    c.Left = l: c.Top = t: c.Width = w: c.Height = h
+End Sub
+
